@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="kk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Шифрланған жазбалар қоймасы (PBKDF2 + AES-GCM)</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <h1>🔐 Master-парольмен қорғалған жазбалар қоймасы</h1>
+
+  <!-- ===== Кіру экраны ===== -->
+  <div id="loginScreen">
+    <div class="card">
+      <h2>Жаңа шифрланған файл жасау</h2>
+      <label>Master-пароль (кемінде 8 таңба)</label>
+      <input type="password" id="newPass">
+      <label>Парольді қайталаңыз</label>
+      <input type="password" id="newPass2">
+      <button onclick="createVault()">Файл жасау</button>
+    </div>
+
+    <div class="card">
+      <h2>Бар файлды ашу</h2>
+      <label>Шифрланған файл (.vault)</label>
+      <input type="file" id="fileInput">
+      <label>Master-пароль</label>
+      <input type="password" id="openPass">
+      <button onclick="openVault()">Ашу</button>
+    </div>
+    <div id="loginMsg"></div>
+  </div>
+
+  <!-- ===== Жазбалар экраны ===== -->
+  <div id="vaultScreen" class="hidden">
+    <div class="card">
+      <button class="green" onclick="saveVault()">💾 Файлды сақтау (жүктеп алу)</button>
+      <button class="gray" onclick="closeVault()">Жабу (кілтті өшіру)</button>
+      <span id="dirtyMark" class="dirty"></span>
+      <div id="vaultMsg"></div>
+    </div>
+
+    <div class="card">
+      <h2 id="formTitle">Жазба қосу</h2>
+      <div class="row">
+        <div><label>Атауы</label><input id="fTitle"></div>
+        <div><label>Логин</label><input id="fLogin"></div>
+      </div>
+      <label>Құпия (пароль)</label>
+      <input id="fSecret">
+      <label>Ескертпе</label>
+      <textarea id="fNote" rows="2"></textarea>
+      <button onclick="submitRecord()" id="submitBtn">Қосу</button>
+      <button class="gray hidden" id="cancelBtn" onclick="resetForm()">Бас тарту</button>
+    </div>
+
+    <div class="card">
+      <h2>Жазбалар</h2>
+      <input id="searchBox" placeholder="🔎 Іздеу (атауы, логин, ескертпе)..." oninput="renderList()">
+      <div id="list"></div>
+    </div>
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
