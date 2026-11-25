@@ -1,0 +1,1284 @@
+==========================================================================================
+FILE: src/main/java/kz/vault/app/Main.java
+==========================================================================================
+package kz.vault.app;
+
+import java.nio.file.*;
+import java.util.*;
+import kz.vault.model.*;
+import kz.vault.service.*;
+import kz.vault.storage.*;
+
+public final class Main {
+  private static final Scanner IN = new Scanner(System.in);
+
+  public static String normalizedChoice(String value) {
+    return value.trim();
+  }
+
+  public static boolean shouldSave(String value) {
+    return value.isBlank() || value.equalsIgnoreCase("y");
+  }
+
+  public static String[] editableFields(RecordType type) {
+    return type == RecordType.PASSWORD
+        ? new String[] {"title", "login", "secret", "note"}
+        : new String[] {"title", "note"};
+  }
+
+  private static String line(String prompt) {
+    System.out.print(prompt);
+    return IN.nextLine();
+  }
+
+  private static char[] password() {
+    var c = System.console();
+    if (c != null) return c.readPassword("Master-пароль: ");
+    System.out.println("Бұл ортада пароль экранда көрінеді.");
+    return line("Master-пароль: ").toCharArray();
+  }
+
+  public static void main(String[] args) throws Exception {
+    Path database = Path.of(args.length == 0 ? "records.db" : args[0]);
+    try (VaultService vault = new VaultService(new SqliteVaultDao(database));
+        ReportService reports = new ReportService()) {
+      Analytics analytics = new Analytics();
+      boolean dirty = false;
+      while (true) {
+        try {
+          if (!vault.isOpen()) {
+            System.out.println("1 Жаңа қойма | 2 Ашу | 3 Ескі .vault импорттау | 0 Шығу");
+            String c = normalizedChoice(line("> "));
+            if (c.equals("0")) return;
+            if (!Set.of("1", "2", "3").contains(c)) continue;
+            String legacy = c.equals("3") ? line(".vault жолы: ") : null;
+            char[] p = password();
+            try {
+              if (c.equals("1")) {
+                char[] repeat = password();
+                try {
+                  if (!Arrays.equals(p, repeat))
+                    throw new IllegalArgumentException("Парольдер сәйкес емес");
+                  vault.create(p);
+                } finally {
+                  Arrays.fill(repeat, ' ');
+                }
+              } else if (c.equals("2")) vault.open(p);
+              else vault.importLegacy(Path.of(legacy), p);
+            } finally {
+              Arrays.fill(p, ' ');
+            }
+            dirty = false;
+            continue;
+          }
+          System.out.println(
+              "1 Тізім | 2 Пароль қосу | 3 Мәтін қосу | 4 Іздеу | 5 Толық көру | 6 Өзгерту | 7 Жою"
+                  + " | 8 Сақтау | 9 Аналитика | 10 CSV (фонда) | 0 Жабу"
+                  + (dirty ? " *" : ""));
+          switch (normalizedChoice(line("> "))) {
+            case "1" -> vault.all().forEach(r -> System.out.println(r.describe()));
+            case "2" -> {
+              vault.addPassword(
+                  line("Атауы: "), line("Логин: "), line("Құпия: "), line("Ескертпе: "));
+              dirty = true;
+            }
+            case "3" -> {
+              vault.addNote(line("Атауы: "), line("Мәтін: "));
+              dirty = true;
+            }
+            case "4" -> {
+              String q = line("Іздеу: ");
+              String t = line("PASSWORD/NOTE немесе бос: ").trim();
+              var found =
+                  t.isEmpty()
+                      ? analytics.search(vault.all(), q)
+                      : analytics.search(
+                          vault.all(), q, RecordType.valueOf(t.toUpperCase(Locale.ROOT)));
+              found.forEach(r -> System.out.println(r.describe()));
+            }
+            case "5" -> {
+              int id = Integer.parseInt(line("ID: "));
+              System.out.println(
+                  vault.all().stream()
+                      .filter(r -> r.getId() == id)
+                      .findFirst()
+                      .orElseThrow(() -> new IllegalArgumentException("Жазба жоқ"))
+                      .details());
+            }
+            case "6" -> {
+              int id = Integer.parseInt(line("ID: "));
+              var record =
+                  vault.all().stream()
+                      .filter(r -> r.getId() == id)
+                      .findFirst()
+                      .orElseThrow(() -> new IllegalArgumentException("Жазба жоқ"));
+              Map<String, String> m = new HashMap<>();
+              for (String f : editableFields(record.getType())) {
+                String v = line(f + " (Enter = қалдыру): ");
+                if (!v.isEmpty()) m.put(f, v);
+              }
+              if (!m.isEmpty()) {
+                vault.edit(id, m);
+                dirty = true;
+              }
+            }
+            case "7" -> {
+              if (vault.delete(Integer.parseInt(line("ID: ")))) dirty = true;
+              else System.out.println("Жазба жоқ");
+            }
+            case "8" -> {
+              vault.save();
+              dirty = false;
+              System.out.println("Сақталды");
+            }
+            case "9" -> {
+              System.out.println("Саны: " + analytics.counts(vault.all()));
+              System.out.println("Түрлері: " + analytics.types(vault.all()));
+              System.out.println("Атаулары: " + analytics.titles(vault.all()));
+            }
+            case "10" -> {
+              reports
+                  .exportCsv(vault.all(), Path.of("reports"))
+                  .whenComplete(
+                      (file, error) ->
+                          System.out.println(
+                              error == null
+                                  ? "Есеп дайын: " + file
+                                  : "Экспорт қатесі: " + error.getMessage()));
+              System.out.println("Экспорт басталды, мәзір қолжетімді.");
+            }
+            case "0" -> {
+              if (dirty && shouldSave(line("Сақтау? y/n [y]: "))) vault.save();
+              vault.close();
+              dirty = false;
+            }
+            default -> System.out.println("Қате таңдау");
+          }
+        } catch (NoSuchElementException e) {
+          System.out.println("Енгізу аяқталды. Өзгерістер автоматты сақталмайды.");
+          return;
+        } catch (Exception e) {
+          System.out.println("ҚАТЕ: " + e.getMessage());
+        }
+      }
+    }
+  }
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/crypto/CryptoEngine.java
+==========================================================================================
+package kz.vault.crypto;
+
+import java.security.*;
+import javax.crypto.*;
+import javax.crypto.spec.*;
+
+public final class CryptoEngine implements Encryptor {
+  public static byte[] random(int n) {
+    byte[] b = new byte[n];
+    new SecureRandom().nextBytes(b);
+    return b;
+  }
+
+  public static byte[] derive(char[] password, byte[] salt, int iterations) throws VaultException {
+    if (salt.length != 16 || iterations < 1000 || iterations > 10000000)
+      throw new VaultException("KDF параметрлері қате");
+    PBEKeySpec spec = new PBEKeySpec(password, salt, iterations, 256);
+    try {
+      return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
+    } catch (GeneralSecurityException e) {
+      throw new VaultException("Кілт алу қатесі", e);
+    } finally {
+      spec.clearPassword();
+    }
+  }
+
+  private byte[] run(int mode, byte[] key, byte[] nonce, byte[] input, byte[] aad)
+      throws VaultException {
+    try {
+      Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+      c.init(mode, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, nonce));
+      c.updateAAD(aad);
+      return c.doFinal(input);
+    } catch (GeneralSecurityException e) {
+      throw new VaultException("Пароль қате немесе дерек бүлінген", e);
+    }
+  }
+
+  public byte[] encrypt(byte[] k, byte[] n, byte[] p, byte[] a) throws VaultException {
+    return run(Cipher.ENCRYPT_MODE, k, n, p, a);
+  }
+
+  public byte[] decrypt(byte[] k, byte[] n, byte[] c, byte[] a) throws VaultException {
+    return run(Cipher.DECRYPT_MODE, k, n, c, a);
+  }
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/crypto/Encryptor.java
+==========================================================================================
+package kz.vault.crypto;
+
+public interface Encryptor {
+  byte[] encrypt(byte[] key, byte[] nonce, byte[] plain, byte[] aad) throws VaultException;
+
+  byte[] decrypt(byte[] key, byte[] nonce, byte[] cipher, byte[] aad) throws VaultException;
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/crypto/Envelope.java
+==========================================================================================
+package kz.vault.crypto;
+
+import java.nio.ByteBuffer;
+import java.util.Arrays;
+
+public final class Envelope {
+  public static final int HEADER = 37, ITERATIONS = 200000;
+  private final Encryptor crypto = new CryptoEngine();
+
+  public byte[] seal(byte[] key, byte[] salt, int iterations, byte[] plain) throws VaultException {
+    byte[] nonce = CryptoEngine.random(12);
+    byte[] header =
+        ByteBuffer.allocate(HEADER)
+            .put(new byte[] {'K', 'V', 'L', 'T'})
+            .put((byte) 1)
+            .putInt(iterations)
+            .put(salt)
+            .put(nonce)
+            .array();
+    byte[] cipher = crypto.encrypt(key, nonce, plain, header);
+    return ByteBuffer.allocate(HEADER + cipher.length).put(header).put(cipher).array();
+  }
+
+  public record Opened(byte[] key, byte[] salt, int iterations, byte[] plain) {}
+
+  public Opened open(byte[] bytes, char[] password) throws VaultException {
+    if (bytes.length < HEADER + 16) throw new VaultException("Файл тым қысқа");
+    ByteBuffer b = ByteBuffer.wrap(bytes);
+    byte[] magic = new byte[4];
+    b.get(magic);
+    if (!Arrays.equals(magic, new byte[] {'K', 'V', 'L', 'T'}) || b.get() != 1)
+      throw new VaultException("Формат қолдау таппайды");
+    int iterations = b.getInt();
+    byte[] salt = new byte[16], nonce = new byte[12];
+    b.get(salt);
+    b.get(nonce);
+    byte[] key = CryptoEngine.derive(password, salt, iterations);
+    try {
+      return new Opened(
+          key,
+          salt,
+          iterations,
+          crypto.decrypt(
+              key,
+              nonce,
+              Arrays.copyOfRange(bytes, HEADER, bytes.length),
+              Arrays.copyOf(bytes, HEADER)));
+    } catch (VaultException e) {
+      Arrays.fill(key, (byte) 0);
+      throw e;
+    }
+  }
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/crypto/VaultException.java
+==========================================================================================
+package kz.vault.crypto;
+
+public class VaultException extends Exception {
+  public VaultException(String message) {
+    super(message);
+  }
+
+  public VaultException(String message, Throwable cause) {
+    super(message, cause);
+  }
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/model/NoteRecord.java
+==========================================================================================
+package kz.vault.model;
+
+import java.util.Map;
+
+public final class NoteRecord extends VaultRecord {
+  public NoteRecord(int id, String title, String note) {
+    super(id, title, note);
+  }
+
+  public NoteRecord(int id, String title, String note, String created, String updated) {
+    super(id, title, note, created, updated);
+  }
+
+  public RecordType getType() {
+    return RecordType.NOTE;
+  }
+
+  public String details() {
+    return describe() + "\n" + getNote();
+  }
+
+  public VaultRecord edited(Map<String, String> m) {
+    return new NoteRecord(
+        getId(),
+        m.getOrDefault("title", getTitle()),
+        m.getOrDefault("note", getNote()),
+        getCreatedAt(),
+        now());
+  }
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/model/PasswordRecord.java
+==========================================================================================
+package kz.vault.model;
+
+import java.util.*;
+
+public final class PasswordRecord extends VaultRecord {
+  private final String login, secret;
+
+  public PasswordRecord(int id, String title, String login, String secret, String note) {
+    super(id, title, note);
+    this.login = Objects.requireNonNull(login);
+    this.secret = Objects.requireNonNull(secret);
+  }
+
+  public PasswordRecord(
+      int id,
+      String title,
+      String login,
+      String secret,
+      String note,
+      String created,
+      String updated) {
+    super(id, title, note, created, updated);
+    this.login = Objects.requireNonNull(login);
+    this.secret = Objects.requireNonNull(secret);
+  }
+
+  public RecordType getType() {
+    return RecordType.PASSWORD;
+  }
+
+  public String describe() {
+    return super.describe() + " | логин: " + login + " | құпия: ********";
+  }
+
+  public String details() {
+    return super.describe() + " | логин: " + login + " | құпия: " + secret + "\n" + getNote();
+  }
+
+  public boolean matches(String q) {
+    return super.matches(q) || login.toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT));
+  }
+
+  public Map<String, String> toMap() {
+    Map<String, String> m = super.toMap();
+    m.put("login", login);
+    m.put("secret", secret);
+    return m;
+  }
+
+  public VaultRecord edited(Map<String, String> m) {
+    return new PasswordRecord(
+        getId(),
+        m.getOrDefault("title", getTitle()),
+        m.getOrDefault("login", login),
+        m.getOrDefault("secret", secret),
+        m.getOrDefault("note", getNote()),
+        getCreatedAt(),
+        now());
+  }
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/model/RecordType.java
+==========================================================================================
+package kz.vault.model;
+
+public enum RecordType {
+  PASSWORD,
+  NOTE
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/model/Repository.java
+==========================================================================================
+package kz.vault.model;
+
+import java.util.*;
+
+// Immutable жазбалар: экспортқа алынған snapshot кейін өзгермейді.
+public final class Repository<T extends VaultRecord> {
+  private final Map<Integer, T> data = new LinkedHashMap<>();
+
+  public void add(T item) {
+    if (data.putIfAbsent(item.getId(), item) != null)
+      throw new IllegalArgumentException("ID қайталанады");
+  }
+
+  public void replace(T item) {
+    if (!data.containsKey(item.getId())) throw new IllegalArgumentException("Жазба жоқ");
+    data.put(item.getId(), item);
+  }
+
+  public Optional<T> find(int id) {
+    return Optional.ofNullable(data.get(id));
+  }
+
+  public boolean delete(int id) {
+    return data.remove(id) != null;
+  }
+
+  public List<T> all() {
+    return List.copyOf(data.values());
+  }
+
+  public Set<RecordType> types() {
+    Set<RecordType> result = EnumSet.noneOf(RecordType.class);
+    data.values().forEach(r -> result.add(r.getType()));
+    return result;
+  }
+
+  public int nextId() {
+    return Math.addExact(data.keySet().stream().mapToInt(Integer::intValue).max().orElse(0), 1);
+  }
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/model/Searchable.java
+==========================================================================================
+package kz.vault.model;
+
+public interface Searchable {
+  boolean matches(String query);
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/model/VaultRecord.java
+==========================================================================================
+package kz.vault.model;
+
+import java.time.LocalDateTime;
+import java.util.*;
+
+public abstract class VaultRecord implements Searchable {
+  private final int id;
+  private final String title, note, createdAt, updatedAt;
+
+  protected VaultRecord(int id, String title, String note, String createdAt, String updatedAt) {
+    if (id < 1 || title == null || title.isBlank())
+      throw new IllegalArgumentException("ID және атау дұрыс болуы керек");
+    this.id = id;
+    this.title = title;
+    this.note = Objects.requireNonNull(note);
+    this.createdAt = Objects.requireNonNull(createdAt);
+    this.updatedAt = Objects.requireNonNull(updatedAt);
+  }
+
+  protected VaultRecord(int id, String title, String note) {
+    this(id, title, note, now(), now());
+  }
+
+  protected static String now() {
+    return LocalDateTime.now().withNano(0).toString();
+  }
+
+  public int getId() {
+    return id;
+  }
+
+  public String getTitle() {
+    return title;
+  }
+
+  public String getNote() {
+    return note;
+  }
+
+  public String getCreatedAt() {
+    return createdAt;
+  }
+
+  public String getUpdatedAt() {
+    return updatedAt;
+  }
+
+  public abstract RecordType getType();
+
+  public abstract String details();
+
+  public abstract VaultRecord edited(Map<String, String> changes);
+
+  public String describe() {
+    return "#" + id + " [" + getType() + "] " + title;
+  }
+
+  public boolean matches(String q) {
+    String s = q.toLowerCase(Locale.ROOT);
+    return title.toLowerCase(Locale.ROOT).contains(s) || note.toLowerCase(Locale.ROOT).contains(s);
+  }
+
+  public Map<String, String> toMap() {
+    Map<String, String> m = new LinkedHashMap<>();
+    m.put("id", "" + id);
+    m.put("type", getType().name());
+    m.put("title", title);
+    m.put("note", note);
+    m.put("createdAt", createdAt);
+    m.put("updatedAt", updatedAt);
+    return m;
+  }
+
+  public static VaultRecord fromMap(Map<String, String> m) {
+    int id = Integer.parseInt(m.get("id"));
+    return switch (RecordType.valueOf(m.get("type"))) {
+      case NOTE ->
+          new NoteRecord(id, m.get("title"), m.get("note"), m.get("createdAt"), m.get("updatedAt"));
+      case PASSWORD ->
+          new PasswordRecord(
+              id,
+              m.get("title"),
+              m.get("login"),
+              m.get("secret"),
+              m.get("note"),
+              m.get("createdAt"),
+              m.get("updatedAt"));
+    };
+  }
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/service/Analytics.java
+==========================================================================================
+package kz.vault.service;
+
+import java.util.*;
+import java.util.stream.Collectors;
+import kz.vault.model.*;
+
+public final class Analytics {
+  public List<VaultRecord> search(List<VaultRecord> records, String query) {
+    return records.stream().filter(r -> r.matches(query)).toList();
+  }
+
+  public List<VaultRecord> search(List<VaultRecord> records, String query, RecordType type) {
+    return search(records, query).stream().filter(r -> r.getType() == type).toList();
+  }
+
+  public List<String> titles(List<VaultRecord> records) {
+    return records.stream().map(VaultRecord::getTitle).toList();
+  }
+
+  public Map<RecordType, Long> counts(List<VaultRecord> records) {
+    return records.stream()
+        .collect(
+            Collectors.groupingBy(
+                VaultRecord::getType,
+                () -> new EnumMap<>(RecordType.class),
+                Collectors.counting()));
+  }
+
+  public Set<RecordType> types(List<VaultRecord> records) {
+    return records.stream().map(VaultRecord::getType).collect(Collectors.toSet());
+  }
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/service/ReportService.java
+==========================================================================================
+package kz.vault.service;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+import kz.vault.model.*;
+
+public final class ReportService implements AutoCloseable {
+  private final ExecutorService executor = Executors.newFixedThreadPool(2);
+
+  // Құпия деректер worker-ге берілмейді. Әр тапсырма жеке файлға жазады.
+  public CompletableFuture<Path> exportCsv(List<VaultRecord> records, Path directory) {
+    List<String> rows =
+        records.stream()
+            .map(
+                r ->
+                    r.getId()
+                        + ","
+                        + r.getType()
+                        + ","
+                        + csv(r.getTitle())
+                        + ","
+                        + csv(r.getCreatedAt())
+                        + ","
+                        + csv(r.getUpdatedAt()))
+            .toList();
+    return CompletableFuture.supplyAsync(
+        () -> {
+          Path tmp = null;
+          try {
+            Files.createDirectories(directory);
+            tmp = Files.createTempFile(directory, ".report-", ".tmp");
+            List<String> lines = new ArrayList<>();
+            lines.add("id,type,title,createdAt,updatedAt");
+            lines.addAll(rows);
+            Files.write(tmp, lines, StandardCharsets.UTF_8);
+            Path result = directory.resolve("report-" + UUID.randomUUID() + ".csv");
+            try {
+              Files.move(tmp, result, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+              Files.move(tmp, result);
+            }
+            return result;
+          } catch (IOException e) {
+            throw new CompletionException(e);
+          } finally {
+            if (tmp != null)
+              try {
+                Files.deleteIfExists(tmp);
+              } catch (IOException ignored) {
+              }
+          }
+        },
+        executor);
+  }
+
+  private static String csv(String text) {
+    // CSV формуласы орындалмауы үшін қауіпті алғашқы таңбаны бейтараптау.
+    String s = text;
+    String leading = s.stripLeading();
+    if (!leading.isEmpty() && "=+-@".indexOf(leading.charAt(0)) >= 0
+        || s.startsWith("\t")
+        || s.startsWith("\r")) s = "'" + s;
+    return "\"" + s.replace("\"", "\"\"") + "\"";
+  }
+
+  public void close() {
+    executor.shutdown();
+    try {
+      if (!executor.awaitTermination(30, TimeUnit.SECONDS)) executor.shutdownNow();
+    } catch (InterruptedException e) {
+      executor.shutdownNow();
+      Thread.currentThread().interrupt();
+    }
+  }
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/service/VaultService.java
+==========================================================================================
+package kz.vault.service;
+
+import com.fasterxml.jackson.databind.*;
+import java.nio.file.*;
+import java.util.*;
+import kz.vault.crypto.*;
+import kz.vault.model.*;
+import kz.vault.storage.*;
+
+public final class VaultService implements AutoCloseable {
+  private final VaultDao dao;
+  private final ObjectMapper mapper =
+      new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+  private final Envelope envelope = new Envelope();
+  private Repository<VaultRecord> records = new Repository<>();
+  private byte[] key, salt;
+  private int iterations;
+
+  public VaultService(VaultDao dao) {
+    this.dao = dao;
+  }
+
+  public synchronized boolean isOpen() {
+    return key != null;
+  }
+
+  private void requireOpen() {
+    if (!isOpen()) throw new IllegalStateException("Қойма ашылмаған");
+  }
+
+  public synchronized void create(char[] password) throws Exception {
+    if (password.length < 8) throw new IllegalArgumentException("Кемінде 8 таңба керек");
+    if (dao.load().isPresent()) throw new IllegalStateException("Қойма бар");
+    close();
+    salt = CryptoEngine.random(16);
+    iterations = Envelope.ITERATIONS;
+    key = CryptoEngine.derive(password, salt, iterations);
+    try {
+      persist(true);
+    } catch (Exception e) {
+      close();
+      throw e;
+    }
+  }
+
+  public synchronized void open(char[] password) throws Exception {
+    loadBytes(dao.load().orElseThrow(() -> new IllegalStateException("Қойма жоқ")), password);
+  }
+
+  private void loadBytes(byte[] bytes, char[] password) throws Exception {
+    Envelope.Opened opened = envelope.open(bytes, password);
+    try {
+      JsonNode root = mapper.readTree(opened.plain());
+      if (!root.isObject() || !root.path("records").isArray())
+        throw new VaultException("JSON құрылымы қате");
+      Repository<VaultRecord> candidate = new Repository<>();
+      for (JsonNode node : root.get("records")) {
+        if (!node.isObject()) throw new VaultException("Жазба құрылымы қате");
+        Map<String, String> m = new LinkedHashMap<>();
+        var fields = node.fields();
+        while (fields.hasNext()) {
+          var f = fields.next();
+          if (!f.getValue().isTextual()) throw new VaultException("Жол күтілді");
+          m.put(f.getKey(), f.getValue().asText());
+        }
+        candidate.add(VaultRecord.fromMap(m));
+      }
+      close();
+      records = candidate;
+      key = opened.key();
+      salt = opened.salt();
+      iterations = opened.iterations();
+    } catch (Exception e) {
+      Arrays.fill(opened.key(), (byte) 0);
+      throw e;
+    } finally {
+      Arrays.fill(opened.plain(), (byte) 0);
+    }
+  }
+
+  // Бастапқы KVLT .vault файлын бос SQLite қоймасына көшіру.
+  public synchronized void importLegacy(Path file, char[] password) throws Exception {
+    if (dao.load().isPresent() || isOpen())
+      throw new IllegalStateException("Импортқа бос қойма керек");
+    loadBytes(Files.readAllBytes(file), password);
+    try {
+      persist(true);
+    } catch (Exception e) {
+      close();
+      throw e;
+    }
+  }
+
+  private byte[] encrypted() throws Exception {
+    requireOpen();
+    byte[] plain =
+        mapper.writeValueAsBytes(
+            Map.of(
+                "nextId",
+                "" + records.nextId(),
+                "records",
+                records.all().stream().map(VaultRecord::toMap).toList()));
+    try {
+      return envelope.seal(key, salt, iterations, plain);
+    } finally {
+      Arrays.fill(plain, (byte) 0);
+    }
+  }
+
+  private void persist(boolean create) throws Exception {
+    dao.save(encrypted(), create);
+  }
+
+  public synchronized void save() throws Exception {
+    persist(false);
+  }
+
+  public synchronized List<VaultRecord> all() {
+    requireOpen();
+    return records.all();
+  }
+
+  public synchronized void addNote(String title, String text) {
+    requireOpen();
+    records.add(new NoteRecord(records.nextId(), title, text));
+  }
+
+  public synchronized void addPassword(String title, String login, String secret, String note) {
+    requireOpen();
+    records.add(new PasswordRecord(records.nextId(), title, login, secret, note));
+  }
+
+  public synchronized void edit(int id, Map<String, String> changes) {
+    requireOpen();
+    VaultRecord r = records.find(id).orElseThrow(() -> new IllegalArgumentException("Жазба жоқ"));
+    records.replace(r.edited(changes));
+  }
+
+  public synchronized boolean delete(int id) {
+    requireOpen();
+    return records.delete(id);
+  }
+
+  public synchronized void close() {
+    if (key != null) Arrays.fill(key, (byte) 0);
+    key = null;
+    salt = null;
+    records = new Repository<>();
+  }
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/storage/SqliteVaultDao.java
+==========================================================================================
+package kz.vault.storage;
+
+import java.nio.file.Path;
+import java.sql.*;
+import java.util.Optional;
+
+public final class SqliteVaultDao implements VaultDao {
+  private final String url;
+
+  public SqliteVaultDao(Path file) throws SQLException {
+    url = "jdbc:sqlite:" + file.toAbsolutePath();
+    try (Connection c = connect();
+        Statement s = c.createStatement()) {
+      s.executeUpdate(
+          "CREATE TABLE IF NOT EXISTS vault(id INTEGER PRIMARY KEY CHECK(id=1),payload BLOB NOT"
+              + " NULL)");
+      s.executeUpdate(
+          "CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,action TEXT NOT"
+              + " NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+    }
+  }
+
+  private Connection connect() throws SQLException {
+    Connection c = DriverManager.getConnection(url);
+    try (Statement s = c.createStatement()) {
+      s.execute("PRAGMA busy_timeout=5000");
+    }
+    return c;
+  }
+
+  public Optional<byte[]> load() throws SQLException {
+    try (Connection c = connect();
+        PreparedStatement p = c.prepareStatement("SELECT payload FROM vault WHERE id=1");
+        ResultSet r = p.executeQuery()) {
+      return r.next() ? Optional.of(r.getBytes(1)) : Optional.empty();
+    }
+  }
+
+  // Деректі сақтау мен audit — бір транзакция. Кез келген қате болса rollback.
+  public void save(byte[] encrypted, boolean create) throws SQLException {
+    try (Connection c = connect()) {
+      c.setAutoCommit(false);
+      try {
+        String sql =
+            create
+                ? "INSERT INTO vault(id,payload) VALUES(1,?)"
+                : "UPDATE vault SET payload=? WHERE id=1";
+        try (PreparedStatement p = c.prepareStatement(sql)) {
+          p.setBytes(1, encrypted);
+          if (p.executeUpdate() != 1) throw new SQLException("Қойма жоқ");
+        }
+        try (PreparedStatement p = c.prepareStatement("INSERT INTO audit(action) VALUES(?)")) {
+          p.setString(1, create ? "CREATE" : "SAVE");
+          p.executeUpdate();
+        }
+        c.commit();
+      } catch (SQLException e) {
+        try {
+          c.rollback();
+        } catch (SQLException r) {
+          e.addSuppressed(r);
+        }
+        throw e;
+      }
+    }
+  }
+}
+
+
+==========================================================================================
+FILE: src/main/java/kz/vault/storage/VaultDao.java
+==========================================================================================
+package kz.vault.storage;
+
+import java.sql.SQLException;
+import java.util.Optional;
+
+public interface VaultDao {
+  Optional<byte[]> load() throws SQLException;
+
+  void save(byte[] encrypted, boolean create) throws SQLException;
+}
+
+
+==========================================================================================
+FILE: src/test/java/kz/vault/AppTest.java
+==========================================================================================
+package kz.vault;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.nio.file.*;
+import java.sql.*;
+import java.util.*;
+import java.util.concurrent.*;
+import kz.vault.crypto.*;
+import kz.vault.model.*;
+import kz.vault.service.*;
+import kz.vault.storage.*;
+import org.junit.jupiter.api.*;
+
+class AppTest {
+
+  @Test
+  void trimsMenuInput() {
+    assertEquals("10", kz.vault.app.Main.normalizedChoice(" 10 "));
+  }
+
+  @Test
+  void saveChoiceDefaultsToYes() {
+    assertTrue(kz.vault.app.Main.shouldSave(""));
+    assertTrue(kz.vault.app.Main.shouldSave("Y"));
+    assertFalse(kz.vault.app.Main.shouldSave("n"));
+  }
+
+  @Test
+  void fieldsDependOnSubtype() {
+    assertArrayEquals(
+        new String[] {"title", "note"}, kz.vault.app.Main.editableFields(RecordType.NOTE));
+    assertArrayEquals(
+        new String[] {"title", "login", "secret", "note"},
+        kz.vault.app.Main.editableFields(RecordType.PASSWORD));
+  }
+}
+
+
+==========================================================================================
+FILE: src/test/java/kz/vault/CryptoTest.java
+==========================================================================================
+package kz.vault;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.nio.file.*;
+import java.sql.*;
+import java.util.*;
+import java.util.concurrent.*;
+import kz.vault.crypto.*;
+import kz.vault.model.*;
+import kz.vault.service.*;
+import kz.vault.storage.*;
+import org.junit.jupiter.api.*;
+
+class CryptoTest {
+
+  @Test
+  void roundTripAndFreshNonce() throws Exception {
+    Envelope e = new Envelope();
+    byte[] salt = CryptoEngine.random(16),
+        key = CryptoEngine.derive("password".toCharArray(), salt, 1000),
+        plain = "Қазақша мәтін".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    byte[] a = e.seal(key, salt, 1000, plain), b = e.seal(key, salt, 1000, plain);
+    assertFalse(Arrays.equals(a, b));
+    assertArrayEquals(plain, e.open(a, "password".toCharArray()).plain());
+  }
+
+  @Test
+  void rejectsWrongPasswordAndTampering() throws Exception {
+    Envelope e = new Envelope();
+    byte[] salt = CryptoEngine.random(16),
+        key = CryptoEngine.derive("password".toCharArray(), salt, 1000);
+    byte[] bytes = e.seal(key, salt, 1000, new byte[] {1, 2, 3});
+    assertThrows(VaultException.class, () -> e.open(bytes, "bad".toCharArray()));
+    bytes[bytes.length - 1] ^= 1;
+    assertThrows(VaultException.class, () -> e.open(bytes, "password".toCharArray()));
+  }
+
+  @Test
+  void authenticatesHeaderAndBounds() throws Exception {
+    Envelope e = new Envelope();
+    byte[] salt = CryptoEngine.random(16),
+        key = CryptoEngine.derive("password".toCharArray(), salt, 1000);
+    byte[] bytes = e.seal(key, salt, 1000, new byte[] {1});
+    bytes[10] ^= 1;
+    assertThrows(VaultException.class, () -> e.open(bytes, "password".toCharArray()));
+    assertThrows(VaultException.class, () -> e.open(new byte[3], new char[0]));
+    assertThrows(
+        VaultException.class, () -> CryptoEngine.derive(new char[0], salt, Integer.MAX_VALUE));
+  }
+}
+
+
+==========================================================================================
+FILE: src/test/java/kz/vault/ModelTest.java
+==========================================================================================
+package kz.vault;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.nio.file.*;
+import java.sql.*;
+import java.util.*;
+import java.util.concurrent.*;
+import kz.vault.crypto.*;
+import kz.vault.model.*;
+import kz.vault.service.*;
+import kz.vault.storage.*;
+import org.junit.jupiter.api.*;
+
+class ModelTest {
+
+  @Test
+  void polymorphism() {
+    VaultRecord n = new NoteRecord(1, "A", "body");
+    VaultRecord p = new PasswordRecord(2, "B", "user", "SECRET", "n");
+    assertEquals(RecordType.NOTE, n.getType());
+    assertTrue(n.details().contains("body"));
+    assertFalse(p.describe().contains("SECRET"));
+    assertTrue(p.details().contains("SECRET"));
+  }
+
+  @Test
+  void genericRepository() {
+    Repository<VaultRecord> r = new Repository<>();
+    r.add(new NoteRecord(1, "A", "B"));
+    r.add(new PasswordRecord(2, "C", "u", "s", "n"));
+    assertEquals(Set.of(RecordType.NOTE, RecordType.PASSWORD), r.types());
+    assertThrows(IllegalArgumentException.class, () -> r.add(new NoteRecord(1, "X", "")));
+    assertTrue(r.delete(1));
+    assertTrue(r.find(1).isEmpty());
+    assertEquals(3, r.nextId());
+  }
+
+  @Test
+  void immutableEdits() {
+    VaultRecord r = new NoteRecord(1, "Old", "body");
+    VaultRecord edited = r.edited(Map.of("title", "New"));
+    assertEquals("Old", r.getTitle());
+    assertEquals("New", edited.getTitle());
+    assertEquals(r.getCreatedAt(), edited.getCreatedAt());
+    assertEquals(edited.toMap(), VaultRecord.fromMap(edited.toMap()).toMap());
+  }
+}
+
+
+==========================================================================================
+FILE: src/test/java/kz/vault/ServiceTest.java
+==========================================================================================
+package kz.vault;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.nio.file.*;
+import java.sql.*;
+import java.util.*;
+import java.util.concurrent.*;
+import kz.vault.crypto.*;
+import kz.vault.model.*;
+import kz.vault.service.*;
+import kz.vault.storage.*;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.TempDir;
+
+class ServiceTest {
+
+  @TempDir Path dir;
+
+  @Test
+  void crudAndEncryptedPersistence() throws Exception {
+    Path db = dir.resolve("a.db");
+    try (VaultService v = new VaultService(new SqliteVaultDao(db))) {
+      v.create("password".toCharArray());
+      v.addPassword("site", "user", "SUPER_SECRET_VALUE", "note");
+      v.addNote("N", "text");
+      v.edit(2, Map.of("title", "Changed"));
+      v.save();
+      v.close();
+      v.open("password".toCharArray());
+      assertEquals(2, v.all().size());
+      assertEquals("Changed", v.all().get(1).getTitle());
+      assertTrue(v.delete(1));
+      v.save();
+      v.close();
+      v.open("password".toCharArray());
+      assertEquals(1, v.all().size());
+    }
+    assertFalse(
+        new String(Files.readAllBytes(db), java.nio.charset.StandardCharsets.ISO_8859_1)
+            .contains("SUPER_SECRET_VALUE"));
+  }
+
+  @Test
+  void failedOpenPreservesSession() throws Exception {
+    try (VaultService v = new VaultService(new SqliteVaultDao(dir.resolve("a.db")))) {
+      v.create("password".toCharArray());
+      v.addNote("unsaved", "body");
+      assertThrows(VaultException.class, () -> v.open("bad".toCharArray()));
+      assertTrue(v.isOpen());
+      assertEquals("unsaved", v.all().get(0).getTitle());
+      v.close();
+      assertThrows(IllegalStateException.class, v::all);
+    }
+  }
+
+  @Test
+  void importsLegacyFormat() throws Exception {
+    byte[] salt = CryptoEngine.random(16),
+        key = CryptoEngine.derive("password".toCharArray(), salt, 1000);
+    String json =
+        "{\"nextId\":\"2\",\"records\":[{\"id\":\"1\",\"type\":\"NOTE\",\"title\":\"old\",\"note\":\"body\",\"createdAt\":\"2026-01-01T00:00:00\",\"updatedAt\":\"2026-01-01T00:00:00\"}]}";
+    Path file = dir.resolve("old.vault");
+    Files.write(
+        file,
+        new Envelope()
+            .seal(key, salt, 1000, json.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    try (VaultService v = new VaultService(new SqliteVaultDao(dir.resolve("a.db")))) {
+      v.importLegacy(file, "password".toCharArray());
+      assertEquals("old", v.all().get(0).getTitle());
+      v.close();
+      v.open("password".toCharArray());
+      assertEquals(1, v.all().size());
+    }
+  }
+
+  @Test
+  void invalidJsonDoesNotDestroySession() throws Exception {
+    Path db = dir.resolve("a.db");
+    VaultDao dao = new SqliteVaultDao(db);
+    try (VaultService v = new VaultService(dao)) {
+      v.create("password".toCharArray());
+      v.addNote("keep", "body");
+      byte[] salt = CryptoEngine.random(16),
+          key = CryptoEngine.derive("password".toCharArray(), salt, 1000);
+      dao.save(new Envelope().seal(key, salt, 1000, "{\"records\":[{}]}".getBytes()), false);
+      assertThrows(Exception.class, () -> v.open("password".toCharArray()));
+      assertEquals("keep", v.all().get(0).getTitle());
+    }
+  }
+
+  @Test
+  void analytics() {
+    List<VaultRecord> rs =
+        List.of(
+            new NoteRecord(1, "Mail", "A"), new PasswordRecord(2, "Site", "MAIL-user", "s", ""));
+    Analytics a = new Analytics();
+    assertEquals(2, a.search(rs, "mail").size());
+    assertEquals(1, a.search(rs, "mail", RecordType.NOTE).size());
+    assertEquals(List.of("Mail", "Site"), a.titles(rs));
+    assertEquals(Map.of(RecordType.NOTE, 1L, RecordType.PASSWORD, 1L), a.counts(rs));
+    assertEquals(Set.of(RecordType.NOTE, RecordType.PASSWORD), a.types(rs));
+  }
+
+  @Test
+  void concurrentExportAndRedaction() throws Exception {
+    try (ReportService r = new ReportService()) {
+      List<VaultRecord> records =
+          List.of(
+              new PasswordRecord(1, "a,\"b\"", "private-login", "private-secret", "private-note"));
+      var a = r.exportCsv(records, dir);
+      var b = r.exportCsv(records, dir);
+      Path x = a.get(10, TimeUnit.SECONDS), y = b.get(10, TimeUnit.SECONDS);
+      assertNotEquals(x, y);
+      String csv = Files.readString(x);
+      assertTrue(csv.contains("\"a,\"\"b\"\"\""));
+      assertFalse(csv.contains("private-"));
+    }
+  }
+
+  @Test
+  void exportFailureIsObservable() throws Exception {
+    Path file = dir.resolve("file");
+    Files.writeString(file, "x");
+    try (ReportService r = new ReportService()) {
+      assertThrows(
+          ExecutionException.class, () -> r.exportCsv(List.of(), file).get(10, TimeUnit.SECONDS));
+    }
+  }
+
+  @Test
+  void csvFormulaEscaping() throws Exception {
+    try (ReportService r = new ReportService()) {
+      Path file =
+          r.exportCsv(List.of(new NoteRecord(1, "=1+1", "")), dir).get(10, TimeUnit.SECONDS);
+      assertTrue(Files.readString(file).contains("\"'=1+1\""));
+    }
+  }
+}
+
+
+==========================================================================================
+FILE: src/test/java/kz/vault/StorageTest.java
+==========================================================================================
+package kz.vault;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.nio.file.*;
+import java.sql.*;
+import java.util.*;
+import java.util.concurrent.*;
+import kz.vault.crypto.*;
+import kz.vault.model.*;
+import kz.vault.service.*;
+import kz.vault.storage.*;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.TempDir;
+
+class StorageTest {
+
+  @TempDir Path dir;
+
+  @Test
+  void insertUpdatePersist() throws Exception {
+    Path db = dir.resolve("a.db");
+    VaultDao d = new SqliteVaultDao(db);
+    assertTrue(d.load().isEmpty());
+    d.save(new byte[] {1}, true);
+    d.save(new byte[] {2, 3}, false);
+    assertArrayEquals(new byte[] {2, 3}, new SqliteVaultDao(db).load().orElseThrow());
+    try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db);
+        Statement s = c.createStatement();
+        ResultSet r = s.executeQuery("SELECT count(*) FROM audit")) {
+      assertTrue(r.next());
+      assertEquals(2, r.getInt(1));
+    }
+  }
+
+  @Test
+  void duplicateCreationDoesNotOverwrite() throws Exception {
+    VaultDao d = new SqliteVaultDao(dir.resolve("a.db"));
+    d.save(new byte[] {1}, true);
+    assertThrows(SQLException.class, () -> d.save(new byte[] {2}, true));
+    assertArrayEquals(new byte[] {1}, d.load().orElseThrow());
+  }
+
+  @Test
+  void rollbackWhenAuditFails() throws Exception {
+    Path db = dir.resolve("a.db");
+    VaultDao d = new SqliteVaultDao(db);
+    d.save(new byte[] {1}, true);
+    try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db);
+        Statement s = c.createStatement()) {
+      s.execute(
+          "CREATE TRIGGER fail_audit BEFORE INSERT ON audit BEGIN SELECT RAISE(ABORT,'test"
+              + " failure'); END");
+    }
+    assertThrows(SQLException.class, () -> d.save(new byte[] {9}, false));
+    assertArrayEquals(new byte[] {1}, d.load().orElseThrow());
+  }
+}
